@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Browser Extensions</title>
+  <link rel="icon" type="image/png" href="./links-32.png">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem 1rem 4rem; color: #1a1a1a; background: #f8fafc; }
+
+    .page-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 2.5rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 1.5rem; }
+    .page-header h1 { font-size: 1.5rem; margin: 0; }
+    .page-header .sub { font-size: 0.85rem; color: #64748b; margin-top: 0.2rem; }
+
+    .ext-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.75rem; }
+    .ext-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1.25rem; }
+    .ext-header img.ext-icon { width: 52px; height: 52px; border-radius: 10px; }
+    .ext-header h2 { margin: 0 0 0.15rem; font-size: 1.15rem; }
+    .ext-header p { margin: 0; font-size: 0.85rem; color: #64748b; }
+
+    .screenshot { width: 100%; max-width: 380px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 1.25rem; display: block; }
+
+    .dl-btn { display: inline-block; margin-bottom: 0.75rem; background: #0f172a; color: #fff; padding: 0.45rem 1rem; border-radius: 6px; text-decoration: none; font-size: 0.88rem; }
+    .dl-btn:hover { background: #1e293b; }
+    ol { margin: 0.5rem 0 0; padding-left: 1.2rem; font-size: 0.88rem; line-height: 1.9; color: #374151; }
+    code { background: #f1f5f9; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.88em; }
+  </style>
+</head>
+<body>
+
+<header class="page-header">
+  <img src="./links-32.png" width="32" height="32" alt="">
+  <div>
+    <h1>Browser Extensions</h1>
+    <div class="sub">Install from source</div>
+  </div>
+</header>
+
+<!-- ── Linkwarden Extension ── -->
+<div class="ext-card">
+  <div class="ext-header">
+    <img class="ext-icon" src="./linkwarden-128.png" alt="Linkwarden icon">
+    <div>
+      <h2>Linkwarden</h2>
+      <p>Save and organise links directly to your Linkwarden instance</p>
+    </div>
+  </div>
+  <img class="screenshot" src="./linkwarden-extension.png" alt="Linkwarden extension screenshot">
+  <a class="dl-btn" href="./extension.zip">Download extension.zip</a>
+  <ol>
+    <li>Unzip <code>extension.zip</code></li>
+    <li>Open <code>chrome://extensions</code> (Chrome) or <code>about:debugging#/runtime/this-firefox</code> (Firefox)</li>
+    <li>Chrome: enable <strong>Developer mode</strong> → <strong>Load unpacked</strong> → select the <code>dist/</code> folder</li>
+    <li>Firefox: click <strong>Load Temporary Add-on…</strong> → select <code>dist/manifest.json</code></li>
+  </ol>
+</div>
+
+<!-- ── Links Extension ── -->
+<div class="ext-card">
+  <div class="ext-header">
+    <img class="ext-icon" src="./links-128.png" alt="Links icon">
+    <div>
+      <h2>Links</h2>
+      <p>Sync and manage bookmarks across browsers with Linkwarden integration</p>
+    </div>
+  </div>
+  <a class="dl-btn" href="./links-extension-chrome.zip">Download for Chrome / Edge / Brave</a><br>
+  <a class="dl-btn" href="./links-extension-firefox.zip" style="margin-top:0.4rem">Download for Firefox</a>
+  <ol>
+    <li>Unzip the archive</li>
+    <li>Chrome: open <code>chrome://extensions</code> → enable <strong>Developer mode</strong> → <strong>Load unpacked</strong> → select the extracted folder</li>
+    <li>Firefox: open <code>about:debugging#/runtime/this-firefox</code> → <strong>Load Temporary Add-on…</strong> → select <code>manifest.json</code> from the extracted folder</li>
+  </ol>
+</div>
+
+</body>
+</html>

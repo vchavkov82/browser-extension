@@ -5,24 +5,24 @@ import OptionsForm from '../../@/components/OptionsForm.tsx';
 
 const App = () => {
   return (
-    <WholeContainer className="max-h-[750px]">
+    <WholeContainer className="max-h-[750px] overflow-y-auto">
       <Container>
         <div className="justify-center items-center p-2 flex">
-          <h1 className="text-lg">Options configuration</h1>
+          <h1 className="text-lg">Settings</h1>
         </div>
         <div>
           <Separator />
           <p className="text-base pt-2">
-            This is a extension for the{' '}
+            This is an extension for{' '}
             <a
               href="https://github.com/linkwarden/linkwarden"
               rel="noopener"
               target="_blank"
-              className="text-blue-400 hover:text-blue-500 duration-100 hover:underline"
+              className="text-primary hover:underline duration-100"
             >
               Linkwarden
             </a>
-            . Please fill out the following text boxes accordingly.
+            . Fill in your instance URL and credentials to get started.
           </p>
         </div>
         <OptionsForm />

@@ -50,7 +50,7 @@ function App() {
             <Button
               variant="ghost"
               size="icon"
-              className="ring-0 focus:ring-0 outline-none focus:outline-none ring-offset-0 focus:ring-offset-0 focus-visible:ring-offset-0 focus-visible:ring-0 focus-visible:outline-none"
+              aria-label="Open settings"
               onClick={openOptions}
             >
               <Settings className="h-[1.2rem] w-[1.2rem] transition-colors" />

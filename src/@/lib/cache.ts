@@ -1,237 +1,294 @@
 import { getBrowser, getStorageItem, setStorageItem } from './utils.ts';
-import { bookmarkFormValues } from './validators/bookmarkForm.ts';
-import {
-  deleteLinkFetch,
-  postLinkFetch,
-  updateLinkFetch,
-} from './actions/links.ts';
 import BookmarkTreeNode = chrome.bookmarks.BookmarkTreeNode;
-import { getConfig } from './config.ts';
 
 const browser = getBrowser();
 
 const BOOKMARKS_METADATA_KEY = 'lw_bookmarks_metadata_cache';
-// TODO: Implement caching for tabs metadata maybe?
-// I want to cache the all current favorited links in the browser, and cache the ones coming from the server
-// so that I can compare them and only update the ones that are different from the server to the browser and vice versa (if needed)
-// I think I can do this by using the bookmark id as the key, and the value will be the link object itself (or maybe just the url?)
-// I think I can also use the url as the key, and the value will be the bookmark id (or maybe just the bookmark object itself?)
+const SYNC_STATE_KEY = 'lw_sync_state';
 
-export interface bookmarkMetadata extends bookmarkFormValues {
+// New sync-aware metadata schema
+export interface BookmarkSyncEntry {
+  serverId: number;
+  browserBookmarkId: string;
+  collectionId: number;
+  url: string;
+  name: string;
+  isPinned: boolean;
+  serverUpdatedAt: string;
+  syncedAt: string;
+}
+
+export interface SyncState {
+  lastSyncTimestamp: string | null;
+  syncInProgress: boolean;
+  suppressBrowserEvents: boolean;
+}
+
+const DEFAULT_SYNC_STATE: SyncState = {
+  lastSyncTimestamp: null,
+  syncInProgress: false,
+  suppressBrowserEvents: false,
+};
+
+// --- Sync State ---
+
+export async function getSyncState(): Promise<SyncState> {
+  const stored = await getStorageItem(SYNC_STATE_KEY);
+  return stored ? JSON.parse(stored) : { ...DEFAULT_SYNC_STATE };
+}
+
+export async function saveSyncState(state: SyncState): Promise<void> {
+  await setStorageItem(SYNC_STATE_KEY, JSON.stringify(state));
+}
+
+export async function updateSyncState(
+  partial: Partial<SyncState>
+): Promise<SyncState> {
+  const current = await getSyncState();
+  const updated = { ...current, ...partial };
+  await saveSyncState(updated);
+  return updated;
+}
+
+// --- Bookmark Sync Entries ---
+
+export async function getSyncEntries(): Promise<BookmarkSyncEntry[]> {
+  const stored = await getStorageItem(BOOKMARKS_METADATA_KEY);
+  if (!stored) return [];
+  const parsed = JSON.parse(stored);
+  // Migrate from old format if needed
+  if (Array.isArray(parsed) && parsed.length > 0 && 'id' in parsed[0] && !('serverId' in parsed[0])) {
+    return migrateOldFormat(parsed);
+  }
+  return parsed;
+}
+
+export async function saveSyncEntries(
+  entries: BookmarkSyncEntry[]
+): Promise<void> {
+  await setStorageItem(BOOKMARKS_METADATA_KEY, JSON.stringify(entries));
+}
+
+export async function clearSyncEntries(): Promise<void> {
+  await setStorageItem(BOOKMARKS_METADATA_KEY, JSON.stringify([]));
+}
+
+// Lookup by server link ID
+export async function getSyncEntryByServerId(
+  serverId: number
+): Promise<BookmarkSyncEntry | undefined> {
+  const entries = await getSyncEntries();
+  return entries.find((e) => e.serverId === serverId);
+}
+
+// Lookup by browser bookmark ID
+export async function getSyncEntryByBookmarkId(
+  bookmarkId: string
+): Promise<BookmarkSyncEntry | undefined> {
+  const entries = await getSyncEntries();
+  return entries.find((e) => e.browserBookmarkId === bookmarkId);
+}
+
+// Lookup by URL
+export async function getSyncEntryByUrl(
+  url: string
+): Promise<BookmarkSyncEntry | undefined> {
+  const entries = await getSyncEntries();
+  return entries.find((e) => e.url === url);
+}
+
+// Upsert a sync entry (by serverId)
+export async function upsertSyncEntry(
+  entry: BookmarkSyncEntry
+): Promise<void> {
+  const entries = await getSyncEntries();
+  const index = entries.findIndex((e) => e.serverId === entry.serverId);
+  if (index !== -1) {
+    entries[index] = entry;
+  } else {
+    entries.push(entry);
+  }
+  await saveSyncEntries(entries);
+}
+
+// Remove a sync entry by server ID
+export async function removeSyncEntryByServerId(
+  serverId: number
+): Promise<void> {
+  const entries = await getSyncEntries();
+  const filtered = entries.filter((e) => e.serverId !== serverId);
+  await saveSyncEntries(filtered);
+}
+
+// Remove a sync entry by browser bookmark ID
+export async function removeSyncEntryByBookmarkId(
+  bookmarkId: string
+): Promise<void> {
+  const entries = await getSyncEntries();
+  const filtered = entries.filter((e) => e.browserBookmarkId !== bookmarkId);
+  await saveSyncEntries(filtered);
+}
+
+// Build Maps for fast lookups during sync
+export async function getSyncMaps(): Promise<{
+  byServerId: Map<number, BookmarkSyncEntry>;
+  byBookmarkId: Map<string, BookmarkSyncEntry>;
+  byUrl: Map<string, BookmarkSyncEntry>;
+}> {
+  const entries = await getSyncEntries();
+  return {
+    byServerId: new Map(entries.map((e) => [e.serverId, e])),
+    byBookmarkId: new Map(entries.map((e) => [e.browserBookmarkId, e])),
+    byUrl: new Map(entries.map((e) => [e.url, e])),
+  };
+}
+
+// --- Browser Bookmarks Helpers ---
+
+export async function createBookmarkInBrowser(
+  url: string,
+  title: string,
+  parentId?: string
+): Promise<BookmarkTreeNode> {
+  return await browser.bookmarks.create({ url, title, parentId });
+}
+
+export async function updateBookmarkInBrowser(
+  bookmarkId: string,
+  changes: { url?: string; title?: string }
+): Promise<BookmarkTreeNode> {
+  return await browser.bookmarks.update(bookmarkId, changes);
+}
+
+export async function removeBookmarkFromBrowser(
+  bookmarkId: string
+): Promise<void> {
+  try {
+    await browser.bookmarks.remove(bookmarkId);
+  } catch (err) {
+    // Bookmark may already be removed
+    console.warn(`Failed to remove bookmark ${bookmarkId}:`, err);
+  }
+}
+
+export async function moveBookmarkInBrowser(
+  bookmarkId: string,
+  destination: { parentId?: string; index?: number }
+): Promise<BookmarkTreeNode> {
+  return await browser.bookmarks.move(bookmarkId, destination);
+}
+
+export async function getBrowserBookmarkTree(): Promise<BookmarkTreeNode[]> {
+  const [root] = await browser.bookmarks.getTree();
+  return root.children || [];
+}
+
+// Walk the full bookmark tree and collect all bookmark URLs (not folders)
+export function collectBookmarks(
+  nodes: BookmarkTreeNode[],
+  accumulator: Array<{
+    id: string;
+    url: string;
+    title: string;
+    parentId?: string;
+  }>
+): void {
+  for (const node of nodes) {
+    if (node.url) {
+      accumulator.push({
+        id: node.id,
+        url: node.url,
+        title: node.title,
+        parentId: node.parentId,
+      });
+    } else if (node.children) {
+      collectBookmarks(node.children, accumulator);
+    }
+  }
+}
+
+// --- Migration from old format ---
+
+interface OldBookmarkMetadata {
   id: number;
   collectionId: number;
   bookmarkId?: string;
+  url: string;
+  name: string;
+  description: string;
+  tags: Array<{ name: string }>;
 }
 
-const DEFAULTS: bookmarkMetadata[] = [];
+function migrateOldFormat(old: OldBookmarkMetadata[]): BookmarkSyncEntry[] {
+  return old
+    .filter((o) => o.bookmarkId && o.url)
+    .map((o) => ({
+      serverId: o.id,
+      browserBookmarkId: o.bookmarkId!,
+      collectionId: o.collectionId,
+      url: o.url,
+      name: o.name || '',
+      isPinned: false,
+      serverUpdatedAt: new Date().toISOString(),
+      syncedAt: new Date().toISOString(),
+    }));
+}
 
-export async function getBookmarksMetadata(): Promise<bookmarkMetadata[]> {
-  const bookmarksMetadata = await getStorageItem(BOOKMARKS_METADATA_KEY);
-  return bookmarksMetadata ? JSON.parse(bookmarksMetadata) : DEFAULTS;
+// --- Legacy compatibility re-exports ---
+// These allow existing code to keep working during transition.
+
+export type bookmarkMetadata = OldBookmarkMetadata;
+
+export async function getBookmarksMetadata(): Promise<OldBookmarkMetadata[]> {
+  const stored = await getStorageItem(BOOKMARKS_METADATA_KEY);
+  return stored ? JSON.parse(stored) : [];
 }
 
 export async function saveBookmarksMetadata(
-  bookmarksMetadata: bookmarkMetadata[]
-) {
-  return await setStorageItem(
+  bookmarksMetadata: OldBookmarkMetadata[]
+): Promise<void> {
+  await setStorageItem(
     BOOKMARKS_METADATA_KEY,
     JSON.stringify(bookmarksMetadata)
   );
 }
 
-export async function clearBookmarksMetadata() {
-  return await setStorageItem(BOOKMARKS_METADATA_KEY, JSON.stringify([]));
+export async function clearBookmarksMetadata(): Promise<void> {
+  await clearSyncEntries();
 }
 
-export async function getBookmarkMetadataById(
-  id: number
-): Promise<bookmarkMetadata | undefined> {
+export async function saveBookmarkMetadata(
+  bookmarkMetadata: OldBookmarkMetadata
+): Promise<void> {
   const bookmarksMetadata = await getBookmarksMetadata();
-  return bookmarksMetadata.find(
-    (bookmarkMetadata) => bookmarkMetadata.id === id
-  );
-}
-
-export async function getBookmarkMetadataByBookmarkId(
-  bookmarkId: string
-): Promise<bookmarkMetadata | undefined> {
-  const bookmarksMetadata = await getBookmarksMetadata();
-  return bookmarksMetadata.find(
-    (bookmarkMetadata) => bookmarkMetadata.bookmarkId === bookmarkId
-  );
-}
-
-export async function getBookmarkMetadataByUrl(
-  url: string
-): Promise<bookmarkMetadata | undefined> {
-  const bookmarksMetadata = await getBookmarksMetadata();
-  return bookmarksMetadata.find(
-    (bookmarkMetadata) => bookmarkMetadata.url === url
-  );
-}
-
-export async function saveBookmarkMetadata(bookmarkMetadata: bookmarkMetadata) {
-  const bookmarksMetadata = await getBookmarksMetadata();
-  const index = bookmarksMetadata.findIndex(
-    (bookmarkMetadataObject) =>
-      bookmarkMetadataObject.id === bookmarkMetadata.id
-  );
+  const index = bookmarksMetadata.findIndex((b) => b.id === bookmarkMetadata.id);
   if (index !== -1) {
     bookmarksMetadata[index] = bookmarkMetadata;
   } else {
     bookmarksMetadata.push(bookmarkMetadata);
   }
-  return await saveBookmarksMetadata(bookmarksMetadata);
+  await saveBookmarksMetadata(bookmarksMetadata);
 }
 
-export async function deleteBookmarkMetadata(id: string | undefined) {
+export async function deleteBookmarkMetadata(
+  id: string | undefined
+): Promise<void> {
+  if (!id) return;
   const bookmarksMetadata = await getBookmarksMetadata();
-  const index = bookmarksMetadata.findIndex(
-    (bookmarkMetadata) => bookmarkMetadata.bookmarkId === id
-  );
-  if (index !== -1) {
-    bookmarksMetadata.splice(index, 1);
-  }
-  return await saveBookmarksMetadata(bookmarksMetadata);
+  const filtered = bookmarksMetadata.filter((b) => b.bookmarkId !== id);
+  await saveBookmarksMetadata(filtered);
 }
 
-// It just works, don't MOVE
-// export async function saveLinksInCache(baseUrl: string) {
-//   try {
-//     const { apiKey } = await getConfig();
-//     const links = await getLinksFetch(baseUrl, apiKey);
-//     const linksResponse = links.response;
-
-//     // Create a map to track which bookmarks are still present on the server
-//     const serverBookmarkMap = new Map<number, bookmarkMetadata>();
-//     linksResponse.forEach(link => serverBookmarkMap.set(link.id, link));
-
-//     // Get the current bookmarks metadata from the cache
-//     const bookmarksMetadata = await getBookmarksMetadata();
-
-//     // Update or add bookmarks based on server response
-//     for (let link of linksResponse) {
-//       const existingLinkIndex = bookmarksMetadata.findIndex((bookmarkMetadata) => bookmarkMetadata.id === link.id);
-//       if (existingLinkIndex !== -1) {
-//         // Update existing bookmark if there are changes
-//         link = { ...bookmarksMetadata[existingLinkIndex], ...link };
-//         bookmarksMetadata[existingLinkIndex] = link;
-//       } else {
-//         // Add new bookmark from the server
-//         const newLocalBookmark = await createBookmarkInBrowser(link);
-//         link.bookmarkId = newLocalBookmark.id;
-//         bookmarksMetadata.push(link);
-//       }
-//     }
-
-//     // Remove cached bookmarks that are no longer present on the server
-//     const bookmarksToRemove = bookmarksMetadata.filter((bookmarkMetadata) => !serverBookmarkMap.has(bookmarkMetadata.id));
-//     for (const bookmarkToRemove of bookmarksToRemove) {
-//       const indexToRemove = bookmarksMetadata.indexOf(bookmarkToRemove);
-//       if (indexToRemove !== -1) {
-//         bookmarksMetadata.splice(indexToRemove, 1);
-//         if (bookmarkToRemove.bookmarkId != null) {
-//           await browser.bookmarks.remove(bookmarkToRemove.bookmarkId);
-//         }
-//       }
-//     }
-
-//     // Save the updated bookmarks metadata back to the cache
-//     await saveBookmarksMetadata(bookmarksMetadata);
-
-//   } catch (error) {
-//     console.error(error);
-//   }
-// }
-
-export async function createBookmarkInBrowser(
-  bookmark: bookmarkMetadata
-): Promise<BookmarkTreeNode> {
-  const { url, name } = bookmark;
-  return await browser.bookmarks.create({ url, title: name });
+export async function getBookmarkMetadataByBookmarkId(
+  bookmarkId: string
+): Promise<OldBookmarkMetadata | undefined> {
+  const bookmarksMetadata = await getBookmarksMetadata();
+  return bookmarksMetadata.find((b) => b.bookmarkId === bookmarkId);
 }
 
-const getCurrentBookmarks = async () => {
-  return await browser.bookmarks.getTree();
-};
-
-// Testing will remove later, idk if this would be ok to do, since they are being duplicated in the browser.
-export async function syncLocalBookmarks(baseUrl: string) {
-  try {
-    const { apiKey } = await getConfig();
-    // Retrieve all local bookmarks
-    const [root] = await getCurrentBookmarks();
-    const localBookmarks: bookmarkMetadata[] = [];
-    if (!root.children) return;
-    logBookmarks(root.children, localBookmarks);
-
-    // Load cached bookmarks metadata
-    const bookmarksMetadata = await getBookmarksMetadata();
-
-    // Create a map of cached bookmarks by URL for easy lookup
-    const cachedBookmarksMap = new Map(
-      bookmarksMetadata.map((bm) => [bm.url, bm])
-    );
-
-    // Prepare arrays to hold promises for new, updated, and deleted bookmarks
-    const createPromises = [];
-    const updatePromises = [];
-    const deletePromises = [];
-
-    // Sync new and updated local bookmarks to the server
-    for (const localBookmark of localBookmarks) {
-      const cachedBookmark = cachedBookmarksMap.get(localBookmark.url);
-      if (!cachedBookmark) {
-        // New bookmark
-        createPromises.push(postLinkFetch(baseUrl, localBookmark, apiKey));
-      } else if (cachedBookmark.name !== localBookmark.name) {
-        // Updated bookmark
-        updatePromises.push(
-          updateLinkFetch(baseUrl, cachedBookmark.id, localBookmark, apiKey)
-        );
-      }
-      // Remove from the map to track deleted bookmarks
-      cachedBookmarksMap.delete(localBookmark.url);
-    }
-
-    // Prepare delete promises for bookmarks that are no longer in the local bookmarks
-    for (const [, cachedBookmark] of cachedBookmarksMap) {
-      deletePromises.push(deleteLinkFetch(baseUrl, cachedBookmark.id, apiKey));
-    }
-
-    // Run all create, update, and delete operations in parallel
-    await Promise.all([
-      ...createPromises,
-      ...updatePromises,
-      ...deletePromises,
-    ]);
-
-    // Update the cached bookmarks metadata
-    await saveBookmarksMetadata(localBookmarks);
-  } catch (error) {
-    console.error(error);
-  }
-}
-
-// Helper function to collect all bookmarks recursively
-function logBookmarks(
-  bookmarks: BookmarkTreeNode[],
-  accumulator: bookmarkMetadata[]
-) {
-  for (const bookmark of bookmarks) {
-    if (bookmark.url) {
-      accumulator.push({
-        id: parseInt(bookmark.id), // Convert string id to number
-        collectionId: 0, // Define how to determine collectionId
-        name: bookmark.title,
-        url: bookmark.url,
-        description: '', // Define how to get description
-        collection: { id: 0, name: '', ownerId: 0 }, // Define collection details
-        tags: [], // Define how to get tags
-        bookmarkId: bookmark.id,
-      });
-    } else if (bookmark.children) {
-      logBookmarks(bookmark.children, accumulator);
-    }
-  }
+export async function getBookmarkMetadataByUrl(
+  url: string
+): Promise<OldBookmarkMetadata | undefined> {
+  const bookmarksMetadata = await getBookmarksMetadata();
+  return bookmarksMetadata.find((b) => b.url === url);
 }

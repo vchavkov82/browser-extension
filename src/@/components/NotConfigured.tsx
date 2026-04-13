@@ -6,7 +6,7 @@ const NotConfigured: FC<{ open: boolean }> = ({ open }) => {
   if (!open) return null;
 
   return (
-    <div className="fixed top-0 bottom-0 left-0 right-0 inset-0 bg-white z-10">
+    <div className="fixed top-0 bottom-0 left-0 right-0 inset-0 bg-background z-10">
       <div className="container flex flex-col gap-3 justify-center items-center h-full max-w-lg mx-auto">
         <img
           src="./128.png"
@@ -16,12 +16,14 @@ const NotConfigured: FC<{ open: boolean }> = ({ open }) => {
           alt="Linkwarden Logo"
         />
         <h1
-          className="font-medium text-lg text-zinc-700"
+          className="font-medium text-lg text-foreground"
           style={{ fontSize: '1.65rem' }}
         >
           Initial Setup
         </h1>
-
+        <p className="text-sm text-muted-foreground text-center max-w-xs">
+          Connect to your Linkwarden instance to start saving links from your browser.
+        </p>
         <div className="flex justify-center items-center">
           <Button
             onClick={() => openOptions()}
