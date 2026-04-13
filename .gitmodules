@@ -1,0 +1,3 @@
+[submodule "floccus"]
+	url = https://github.com/vchavkov82/links.git
+	path = floccus
