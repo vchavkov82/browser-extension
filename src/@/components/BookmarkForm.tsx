@@ -264,15 +264,18 @@ const BookmarkForm = () => {
                       <div
                         className={`fade-up min-w-full p-0 overflow-y-auto ${
                           openCollections
-                            ? 'fixed inset-0 w-full h-full z-50 bg-white'
+                            ? 'fixed inset-0 w-full h-full z-50 bg-background'
                             : ''
                         }`}
                       >
                         <Button
-                          className="absolute top-1 right-1 bg-transparent hover:bg-transparent hover:opacity-50 transition-colors ease-in-out duration-200"
+                          variant="ghost"
+                          size="icon"
+                          className="absolute top-1 right-1"
+                          aria-label="Close collection picker"
                           onClick={() => setOpenCollections(false)}
                         >
-                          <X className={`h-4 w-4 text-black dark:text-white`} />
+                          <X className="h-4 w-4" />
                         </Button>
                         <Command className="flex-grow min-w-full dropdown-content rounded-none">
                           <CommandInput
@@ -403,16 +406,6 @@ const BookmarkForm = () => {
             )}
           />
 
-          {!openOptions && (
-            <Label className="flex items-center gap-2 w-fit cursor-pointer">
-              <Checkbox
-                checked={uploadImage}
-                onCheckedChange={handleCheckedChange}
-              />
-              Upload image from browser
-            </Label>
-          )}
-
           {openOptions && (
             <>
               {tagsError ? <p>There was an error...</p> : null}
@@ -526,7 +519,7 @@ const BookmarkForm = () => {
       </Form>
       <Toaster />
       {state && (
-        <div className="fixed inset-0 bg-black backdrop-blur-md bg-opacity-50 flex items-center justify-center">
+        <div className="fixed inset-0 bg-neutral-950/60 backdrop-blur-md flex items-center justify-center">
           <div className="text-white p-4 rounded-md flex flex-col items-center w-fit">
             <svg
               className="animate-spin h-10 w-10"

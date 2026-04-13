@@ -3,199 +3,103 @@ import {
   getCurrentTabInfo,
   updateBadge,
 } from '../../@/lib/utils.ts';
-// import BookmarkTreeNode = chrome.bookmarks.BookmarkTreeNode;
 import { getConfig, isConfigured } from '../../@/lib/config.ts';
-import {
-  // deleteLinkFetch,
-  // updateLinkFetch,
-  postLinkFetch,
-} from '../../@/lib/actions/links.ts';
+import { postLinkFetch } from '../../@/lib/actions/links.ts';
 import {
   bookmarkMetadata,
-  // deleteBookmarkMetadata,
-  // getBookmarkMetadataByBookmarkId,
-  // getBookmarkMetadataByUrl,
   getBookmarksMetadata,
   saveBookmarkMetadata,
+  getSyncState,
 } from '../../@/lib/cache.ts';
+import { enqueueSyncEvent } from '../../@/lib/sync/syncQueue.ts';
+import {
+  initSyncScheduler,
+  handleAlarm,
+} from '../../@/lib/sync/syncScheduler.ts';
+import { performSync } from '../../@/lib/sync/syncEngine.ts';
 import ContextType = chrome.contextMenus.ContextType;
 import OnClickData = chrome.contextMenus.OnClickData;
 import OnInputEnteredDisposition = chrome.omnibox.OnInputEnteredDisposition;
-// import {
-//   getCsrfTokenFetch,
-//   getSessionFetch,
-//   performLoginOrLogoutFetch,
-// } from '../../@/lib/auth/auth.ts';
+import BookmarkTreeNode = chrome.bookmarks.BookmarkTreeNode;
 
 const browser = getBrowser();
 
-// This is the main functions that will be called when a bookmark is created, update or deleted
-// Won't work with axios xhr or something not supported by the browser
+// --- Bookmark Sync Event Listeners ---
 
-// browser.bookmarks.onCreated.addListener(
-//   async (_id: string, bookmark: BookmarkTreeNode) => {
-//     try {
-//       const { syncBookmarks, baseUrl, username, password } = await getConfig();
-//       if (!syncBookmarks || !bookmark.url) {
-//         return;
-//       }
-//       const session = await getSessionFetch(baseUrl);
+browser.bookmarks.onCreated.addListener(
+  async (_id: string, bookmark: BookmarkTreeNode) => {
+    try {
+      const { syncBookmarks } = await getConfig();
+      if (!syncBookmarks || !bookmark.url) return;
+      const state = await getSyncState();
+      if (state.suppressBrowserEvents) return;
+      enqueueSyncEvent({ type: 'created', bookmarkId: bookmark.id });
+    } catch (err) {
+      console.error('[Sync] onCreated error:', err);
+    }
+  }
+);
 
-//       // Check if the bookmark already exists in the server by checking the url so, it doesn't create duplicates
-//       // I know, could use the method search from the api, but I want to avoid as much api specific calls as possible
-//       // in case isn't supported, so I prefer to do it this way, if performance is an issue I will think of change to that.
+browser.bookmarks.onChanged.addListener(
+  async (id: string, _changeInfo: chrome.bookmarks.BookmarkChangeInfo) => {
+    try {
+      const { syncBookmarks } = await getConfig();
+      if (!syncBookmarks) return;
+      const state = await getSyncState();
+      if (state.suppressBrowserEvents) return;
+      enqueueSyncEvent({ type: 'changed', bookmarkId: id });
+    } catch (err) {
+      console.error('[Sync] onChanged error:', err);
+    }
+  }
+);
 
-//       const existingLink = await getBookmarkMetadataByUrl(bookmark.url);
-//       if (existingLink) {
-//         return;
-//       }
+browser.bookmarks.onRemoved.addListener(
+  async (id: string, _removeInfo: chrome.bookmarks.BookmarkRemoveInfo) => {
+    try {
+      const { syncBookmarks } = await getConfig();
+      if (!syncBookmarks) return;
+      const state = await getSyncState();
+      if (state.suppressBrowserEvents) return;
+      enqueueSyncEvent({ type: 'removed', bookmarkId: id });
+    } catch (err) {
+      console.error('[Sync] onRemoved error:', err);
+    }
+  }
+);
 
-//       if (!session) {
-//         const csrfToken = await getCsrfTokenFetch(baseUrl);
+browser.bookmarks.onMoved.addListener(
+  async (id: string, _moveInfo: chrome.bookmarks.BookmarkMoveInfo) => {
+    try {
+      const { syncBookmarks } = await getConfig();
+      if (!syncBookmarks) return;
+      const state = await getSyncState();
+      if (state.suppressBrowserEvents) return;
+      enqueueSyncEvent({ type: 'moved', bookmarkId: id });
+    } catch (err) {
+      console.error('[Sync] onMoved error:', err);
+    }
+  }
+);
 
-//         await performLoginOrLogoutFetch(
-//           `${baseUrl}/api/v1/auth/callback/credentials`,
-//           {
-//             csrfToken: csrfToken,
-//             callbackUrl: `${baseUrl}/api/v1/auth/callback`,
-//             json: true,
-//             redirect: false,
-//             username: username,
-//             password: password,
-//           }
-//         );
-//       }
+// --- Alarms (periodic sync) ---
 
-//       const newLink = await postLinkFetch(baseUrl, {
-//         url: bookmark.url,
-//         collection: {
-//           name: 'Unorganized',
-//         },
-//         tags: [],
-//         name: bookmark.title,
-//         description: bookmark.title,
-//       });
+browser.alarms.onAlarm.addListener(async (alarm) => {
+  try {
+    await handleAlarm(alarm);
+  } catch (err) {
+    console.error('[Sync] Alarm handler error:', err);
+  }
+});
 
-//       const newLinkJson = await newLink.json();
-//       const newLinkUrl: bookmarkMetadata = newLinkJson.response;
-//       newLinkUrl.bookmarkId = bookmark.id;
+// --- Context Menus ---
 
-//       await saveBookmarkMetadata(newLinkUrl);
-//     } catch (error) {
-//       console.error(error);
-//     }
-//   }
-// );
-
-// browser.bookmarks.onChanged.addListener(
-//   async (id: string, changeInfo: chrome.bookmarks.BookmarkChangeInfo) => {
-//     try {
-//       const { syncBookmarks, baseUrl, username, password, usingSSO } =
-//         await getConfig();
-//       if (!syncBookmarks || !changeInfo.url) {
-//         return;
-//       }
-
-//       const link = await getBookmarkMetadataByBookmarkId(id);
-
-//       if (!link) {
-//         return;
-//       }
-
-//       const session = await getSessionFetch(baseUrl);
-
-//       if (!session && !usingSSO) {
-//         const csrfToken = await getCsrfTokenFetch(baseUrl);
-
-//         await performLoginOrLogoutFetch(
-//           `${baseUrl}/api/v1/auth/callback/credentials`,
-//           {
-//             csrfToken: csrfToken,
-//             callbackUrl: `${baseUrl}/api/v1/auth/callback`,
-//             json: true,
-//             redirect: false,
-//             username: username,
-//             password: password,
-//           }
-//         );
-//       } else if (!session && usingSSO) {
-//         return;
-//       }
-
-//       const updatedLink = await updateLinkFetch(baseUrl, link.id, {
-//         url: changeInfo.url,
-//         collection: {
-//           name: 'Unorganized',
-//         },
-//         tags: [],
-//         name: changeInfo.title,
-//         description: changeInfo.title,
-//       });
-
-//       const updatedLinkJson = await updatedLink.json();
-//       const newLinkUrl: bookmarkMetadata = updatedLinkJson.response;
-//       newLinkUrl.bookmarkId = id;
-
-//       await saveBookmarkMetadata(newLinkUrl);
-//     } catch (error) {
-//       console.error(error);
-//     }
-//   }
-// );
-
-// browser.bookmarks.onRemoved.addListener(
-//   async (id: string, removeInfo: chrome.bookmarks.BookmarkRemoveInfo) => {
-//     try {
-//       const { syncBookmarks, baseUrl } =
-//         await getConfig();
-//       if (!syncBookmarks || !removeInfo.node.url) {
-//         return;
-//       }
-//       const link = await getBookmarkMetadataByBookmarkId(id);
-
-//       if (!link) {
-//         return;
-//       }
-
-//       const session = await getSessionFetch(baseUrl);
-
-//       if (!session) {
-//         const csrfToken = await getCsrfTokenFetch(baseUrl);
-
-//         await performLoginOrLogoutFetch(
-//           `${baseUrl}/api/v1/auth/callback/credentials`,
-//           {
-//             csrfToken: csrfToken,
-//             callbackUrl: `${baseUrl}/api/v1/auth/callback`,
-//             json: true,
-//             redirect: false,
-//             username: username,
-//             password: password,
-//           }
-//         );
-//       } else if (!session && usingSSO) {
-//         return;
-//       }
-
-//       await Promise.all([
-//         deleteBookmarkMetadata(link.bookmarkId),
-//         deleteLinkFetch(baseUrl, link.id),
-//       ]);
-//     } catch (error) {
-//       console.error(error);
-//     }
-//   }
-// );
-
-// This is for the context menus!
-// Example taken from: https://github.com/GoogleChrome/chrome-extensions-samples/blob/main/api-samples/contextMenus/basic/sample.js
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   // @ts-ignore
   await genericOnClick(info, tab);
 });
 
-// A generic onclick callback function.
 async function genericOnClick(
   info: OnClickData,
   tab: chrome.tabs.Tab | undefined
@@ -275,8 +179,11 @@ async function genericOnClick(
       }
   }
 }
+
+// --- Extension Install / Startup ---
+
 browser.runtime.onInstalled.addListener(async function () {
-  // Create one test item for each context type.
+  // Create context menus
   const contexts: ContextType[] = [
     'page',
     'selection',
@@ -302,7 +209,19 @@ browser.runtime.onInstalled.addListener(async function () {
 
   const { id: tabId } = await getCurrentTabInfo();
   await updateBadge(tabId);
+
+  // Initialize sync scheduler if configured
+  const config = await getConfig();
+  if (config.syncBookmarks) {
+    initSyncScheduler();
+    // Run initial sync on install
+    performSync({ fullSync: true }).catch((err) =>
+      console.error('[Sync] Initial sync failed:', err)
+    );
+  }
 });
+
+// --- Tab Listeners (badge updates) ---
 
 browser.tabs.onActivated.addListener(async ({ tabId }) => {
   try {
@@ -320,7 +239,6 @@ browser.tabs.onUpdated.addListener(async (tabId) => {
   }
 });
 
-// Listen for URL changes (navigation, page loads)
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
     if (changeInfo.status === 'complete' && tab?.active) {
@@ -331,7 +249,7 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
-// On extension startup - check current tab
+// On extension startup - check current tab and init sync
 (async () => {
   try {
     const [tab] = await browser.tabs.query({
@@ -341,12 +259,18 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (tab?.id) {
       await updateBadge(tab.id);
     }
+
+    // Start sync scheduler if configured
+    const config = await getConfig();
+    if (config.syncBookmarks) {
+      initSyncScheduler();
+    }
   } catch (error) {
-    console.error(`Error checking tab on startup:`, error);
+    console.error(`Error on startup:`, error);
   }
 })();
 
-// Omnibox implementation
+// --- Omnibox ---
 
 browser.omnibox.onInputStarted.addListener(async () => {
   const configured = await isConfigured();
@@ -386,8 +310,6 @@ browser.omnibox.onInputChanged.addListener(
   }
 );
 
-// This part was taken https://github.com/sissbruecker/linkding-extension/blob/master/src/background.js Thanks to @sissbruecker
-
 browser.omnibox.onInputEntered.addListener(
   async (content: string, disposition: OnInputEnteredDisposition) => {
     if (!(await isConfigured()) || !content) {
@@ -397,9 +319,6 @@ browser.omnibox.onInputEntered.addListener(
     const isUrl = /^http(s)?:\/\//.test(content);
     const url = isUrl ? content : `lk`;
 
-    // Edge doesn't allow updating the New Tab Page (tested with version 117).
-    // Trying to do so will throw: "Error: Cannot update NTP tab."
-    // As a workaround, open a new tab instead.
     if (disposition === 'currentTab') {
       const tabInfo = await getCurrentTabInfo();
       if (tabInfo.url === 'edge://newtab/') {

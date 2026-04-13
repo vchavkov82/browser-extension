@@ -26,7 +26,8 @@
     "activeTab",
     "tabs",
     "bookmarks",
-    "contextMenus"
+    "contextMenus",
+    "alarms"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

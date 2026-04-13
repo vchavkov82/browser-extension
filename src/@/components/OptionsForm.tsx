@@ -36,13 +36,16 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from './ui/Select.tsx'; // Import the Select component
+} from './ui/Select.tsx';
+import { Checkbox } from './ui/CheckBox.tsx';
+import { performSync } from '../lib/sync/syncEngine.ts';
+import { initSyncScheduler, stopSyncScheduler } from '../lib/sync/syncScheduler.ts';
 
 const OptionsForm = () => {
   const form = useForm<optionsFormValues>({
     resolver: zodResolver(optionsFormSchema),
     defaultValues: {
-      baseUrl: 'https://cloud.linkwarden.app',
+      baseUrl: 'https://links.svc.assistance.bg',
       method: 'username', // Default to 'username'
       username: '',
       password: '',
@@ -163,6 +166,17 @@ const OptionsForm = () => {
             : values.data.response.token,
       });
 
+      // Start or stop sync scheduler based on setting
+      if (values.syncBookmarks) {
+        initSyncScheduler();
+        // Trigger initial sync
+        performSync({ fullSync: true }).catch((err) =>
+          console.error('Initial sync failed:', err)
+        );
+      } else {
+        stopSyncScheduler();
+      }
+
       toast({
         title: 'Saved',
         description:
@@ -203,7 +217,7 @@ const OptionsForm = () => {
                 </FormDescription>
                 <FormControl>
                   <Input
-                    placeholder="https://cloud.linkwarden.app"
+                    placeholder="https://links.svc.assistance.bg"
                     {...field}
                   />
                 </FormControl>
@@ -274,7 +288,7 @@ const OptionsForm = () => {
                       Your Linkwarden Username or Email.
                     </FormDescription>
                     <FormControl>
-                      <Input placeholder="johnny" {...field} />
+                      <Input placeholder="vchavkov" {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -303,14 +317,12 @@ const OptionsForm = () => {
             </>
           )}
 
-          {/* Commented out fields */}
-          {/* 
           <FormField
             control={control}
             name="defaultCollection"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Default collection</FormLabel>
+                <FormLabel>Default Collection</FormLabel>
                 <FormDescription>
                   Default collection to add bookmarks to.
                 </FormDescription>
@@ -321,29 +333,29 @@ const OptionsForm = () => {
               </FormItem>
             )}
           />
-          */}
 
-          {/* 
           <FormField
             control={control}
             name="syncBookmarks"
             render={({ field }) => (
-              <FormItem>
-                <FormLabel>Sync Bookmarks (Experimental)</FormLabel>
-                <FormDescription>
-                  Sync your bookmarks with Linkwarden.
-                </FormDescription>
+              <FormItem className="flex flex-row items-start space-x-3 space-y-0">
                 <FormControl>
                   <Checkbox
                     checked={field.value}
                     onCheckedChange={field.onChange}
                   />
                 </FormControl>
+                <div className="space-y-1 leading-none">
+                  <FormLabel>Sync Bookmarks</FormLabel>
+                  <FormDescription>
+                    Bidirectional sync between browser bookmarks and Linkwarden.
+                    Bookmarks Bar maps to pinned links, folders map to collections.
+                  </FormDescription>
+                </div>
                 <FormMessage />
               </FormItem>
             )}
           />
-          */}
 
           <div className="flex justify-between">
             <div>
@@ -352,7 +364,11 @@ const OptionsForm = () => {
               <Button
                 type="button"
                 className="mb-2"
-                onClick={() => onReset()}
+                onClick={() => {
+                  if (window.confirm('Reset all settings? This will remove your saved credentials.')) {
+                    onReset();
+                  }
+                }}
                 disabled={resetLoading}
               >
                 Reset
@@ -364,6 +380,41 @@ const OptionsForm = () => {
           </div>
         </form>
       </Form>
+      {/* Sync Now button — shown when sync is enabled */}
+      <div className="p-2 pt-0">
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          onClick={async () => {
+            const configured = await isConfigured();
+            if (!configured) {
+              toast({
+                title: 'Not configured',
+                description: 'Save your settings first.',
+                variant: 'destructive',
+              });
+              return;
+            }
+            toast({ title: 'Syncing...', description: 'Bidirectional sync started.' });
+            try {
+              const result = await performSync({ fullSync: true });
+              toast({
+                title: 'Sync complete',
+                description: `Pulled: ${result.pulled}, Pushed: ${result.pushed}, Deleted: ${result.deleted}${result.errors.length ? `, Errors: ${result.errors.length}` : ''}`,
+              });
+            } catch (err) {
+              toast({
+                title: 'Sync failed',
+                description: String(err),
+                variant: 'destructive',
+              });
+            }
+          }}
+        >
+          Sync Now
+        </Button>
+      </div>
       <Toaster />
     </div>
   );
