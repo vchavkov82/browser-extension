@@ -137,12 +137,18 @@ export async function ensureRootCollection(
   const config = await getConfig();
   const label = browserLabel(browserType);
 
-  // Fast path: both IDs already cached in config
+  // Fast path: both IDs already cached — verify the browser folder still exists
   if (config.rootCollectionId && config.rootFolderId) {
-    return {
-      collectionId: config.rootCollectionId,
-      folderId: config.rootFolderId,
-    };
+    const rootTree = await browser.bookmarks.getTree();
+    const folderStillExists = !!findFolderById(rootTree, config.rootFolderId);
+    if (folderStillExists) {
+      return {
+        collectionId: config.rootCollectionId,
+        folderId: config.rootFolderId,
+      };
+    }
+    // Folder was deleted — clear cache and fall through to re-bootstrap
+    await saveConfig({ ...config, rootCollectionId: null, rootFolderId: null });
   }
 
   // --- Server collection ---
