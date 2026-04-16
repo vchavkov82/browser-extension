@@ -145,8 +145,10 @@ async function genericOnClick(
     default:
       // Handle cases where sync is enabled or not
       if (syncBookmarks) {
+        const config = await getConfig();
+        const parentId = config.rootFolderId ?? '1';
         browser.bookmarks.create({
-          parentId: '1',
+          parentId,
           title: tab.title,
           url: tab.url,
         });
