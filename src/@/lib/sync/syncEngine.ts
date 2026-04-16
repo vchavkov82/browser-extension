@@ -29,6 +29,7 @@ import {
   ensureRootCollection,
   reconcileFolderMap,
   getManagedCollectionIds,
+  getFolderMap,
   getCollectionIdForFolder,
   getBrowserFolderIdForCollection,
   getBookmarksBarFolderId,
@@ -535,13 +536,21 @@ export async function hasServerChanges(): Promise<boolean> {
   const state = await getSyncState();
   if (!state.lastSyncTimestamp) return true;
 
+  // If we don't have a root collection yet, assume there may be changes
+  if (!config.rootCollectionId) return true;
+
   try {
     const status = await fetchSyncStatus(config.baseUrl, config.apiKey);
-    // Compare latest collection updates with our last sync
+    // Build managed collection IDs from config + stored folder map
+    const folderMap = await getFolderMap();
+    const managedIds = getManagedCollectionIds(folderMap, config.rootCollectionId);
+
+    // Only trigger sync if a managed collection has changed
     for (const col of status.collections) {
       if (
+        managedIds.has(col.id) &&
         new Date(col.latestUpdate).getTime() >
-        new Date(state.lastSyncTimestamp).getTime()
+          new Date(state.lastSyncTimestamp).getTime()
       ) {
         return true;
       }
