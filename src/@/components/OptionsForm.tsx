@@ -18,7 +18,7 @@ import {
 import { Input } from './ui/Input.tsx';
 import { Button } from './ui/Button.tsx';
 import { useMutation } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import {
   clearConfig,
   getConfig,
@@ -40,8 +40,16 @@ import {
 import { Checkbox } from './ui/CheckBox.tsx';
 import { performSync } from '../lib/sync/syncEngine.ts';
 import { initSyncScheduler, stopSyncScheduler } from '../lib/sync/syncScheduler.ts';
+import { detectBrowserType } from '../lib/utils.ts';
 
 const OptionsForm = () => {
+  const [browserLabel] = useState(() => {
+    const t = detectBrowserType();
+    if (t === 'firefox') return 'Firefox';
+    if (t === 'edge') return 'Edge';
+    return 'Chrome';
+  });
+
   const form = useForm<optionsFormValues>({
     resolver: zodResolver(optionsFormSchema),
     defaultValues: {
@@ -156,7 +164,9 @@ const OptionsForm = () => {
       }
     },
     onSuccess: async (values) => {
+      const existingConfig = await getConfig();
       await saveConfig({
+        ...existingConfig,
         baseUrl: values.baseUrl,
         defaultCollection: values.defaultCollection,
         syncBookmarks: values.syncBookmarks,
@@ -356,6 +366,23 @@ const OptionsForm = () => {
               </FormItem>
             )}
           />
+
+          <div className="flex items-center justify-between text-sm text-neutral-500 dark:text-neutral-400">
+            <span>Browser: <strong>{browserLabel}</strong></span>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-7 px-2 text-xs"
+              onClick={async () => {
+                if (!window.confirm('Reset sync scope? The extension will re-create its root collection on the next sync.')) return;
+                const config = await getConfig();
+                await saveConfig({ ...config, rootCollectionId: null, rootFolderId: null });
+                toast({ title: 'Sync scope reset', description: 'Root collection will be re-bootstrapped on next sync.' });
+              }}
+            >
+              Reset sync scope
+            </Button>
+          </div>
 
           <div className="flex justify-between">
             <div>

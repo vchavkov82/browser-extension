@@ -1,7 +1,10 @@
 // Maps browser bookmark folders <-> Linkwarden collections bidirectionally.
 // Persists mapping in chrome.storage.local.
+// Each browser instance (Firefox / Edge) owns a dedicated root collection so
+// the two sync engines never touch each other's data.
 
 import { getBrowser, getStorageItem, setStorageItem } from '../utils.ts';
+import { saveConfig, getConfig } from '../config.ts';
 import {
   fetchCollections,
   createCollection,
@@ -91,7 +94,97 @@ export function getOtherBookmarksFolderId(
   return rootChildren.find((child) => isOtherBookmarks(child.id))?.id;
 }
 
-// Extracts all user-created sub-folders from browser bookmark tree
+// Returns the Set of collection IDs managed by this browser instance.
+// Includes the root collection itself plus all descendants in the folder map.
+export function getManagedCollectionIds(
+  map: FolderCollectionMap,
+  rootCollectionId: number
+): Set<number> {
+  const ids = new Set<number>([rootCollectionId]);
+  for (const e of map.entries) ids.add(e.collectionId);
+  return ids;
+}
+
+// Browser label for each browser type
+function browserLabel(browserType: string): string {
+  if (browserType === 'firefox') return 'Firefox';
+  if (browserType === 'edge') return 'Edge';
+  return 'Chrome';
+}
+
+// Find a folder by ID anywhere in the bookmark tree (depth-first).
+export function findFolderById(
+  nodes: BookmarkTreeNode[],
+  id: string
+): BookmarkTreeNode | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    if (node.children) {
+      const found = findFolderById(node.children, id);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+// Ensure this browser's root collection + browser folder exist.
+// Idempotent — safe to call on every sync.
+export async function ensureRootCollection(
+  baseUrl: string,
+  apiKey: string,
+  browserType: string
+): Promise<{ collectionId: number; folderId: string }> {
+  const config = await getConfig();
+  const label = browserLabel(browserType);
+
+  // Fast path: both IDs already cached in config
+  if (config.rootCollectionId && config.rootFolderId) {
+    return {
+      collectionId: config.rootCollectionId,
+      folderId: config.rootFolderId,
+    };
+  }
+
+  // --- Server collection ---
+  const serverCollections = await fetchCollections(baseUrl, apiKey);
+  let rootCollection = serverCollections.find(
+    (c) => c.name === label && !c.parentId
+  );
+  if (!rootCollection) {
+    rootCollection = await createCollection(baseUrl, apiKey, { name: label });
+  }
+
+  // --- Browser folder ---
+  const rootTree = await browser.bookmarks.getTree();
+  const otherBookmarksId =
+    getOtherBookmarksFolderId(rootTree[0].children || []) || '2';
+
+  // Look for an existing folder named after the browser directly under Other Bookmarks
+  const otherNode = findFolderById(rootTree, otherBookmarksId);
+  let rootBrowserFolder = otherNode?.children?.find(
+    (n) => !n.url && n.title === label
+  );
+  if (!rootBrowserFolder) {
+    rootBrowserFolder = await browser.bookmarks.create({
+      parentId: otherBookmarksId,
+      title: label,
+    });
+  }
+
+  // Persist to config
+  await saveConfig({
+    ...config,
+    rootCollectionId: rootCollection.id,
+    rootFolderId: rootBrowserFolder.id,
+  });
+
+  return {
+    collectionId: rootCollection.id,
+    folderId: rootBrowserFolder.id,
+  };
+}
+
+// Extracts all user-created sub-folders that are descendants of the given nodes.
 function extractFolders(
   nodes: BookmarkTreeNode[],
   parentId?: string
@@ -99,11 +192,9 @@ function extractFolders(
   const folders: Array<{ id: string; title: string; parentId?: string }> = [];
   for (const node of nodes) {
     if (!node.url && node.children) {
-      // It's a folder
       if (!isRootFolder(node.id)) {
         folders.push({ id: node.id, title: node.title, parentId });
       }
-      // Recurse into sub-folders (but not root-level special folders as parents)
       folders.push(
         ...extractFolders(
           node.children,
@@ -130,7 +221,6 @@ function buildFolderPath(
   return parts.join(' > ');
 }
 
-// Build a path key for matching: "parent > child > folder"
 function buildCollectionPath(
   collection: ServerCollection,
   collectionsById: Map<number, ServerCollection>
@@ -146,19 +236,44 @@ function buildCollectionPath(
   return parts.join(' > ');
 }
 
-// Full reconciliation: sync browser folders <-> server collections
+// Returns the root collection ID and all its descendants as a flat Set.
+function getCollectionSubtreeIds(
+  rootId: number,
+  allCollections: ServerCollection[]
+): Set<number> {
+  const ids = new Set<number>([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const c of allCollections) {
+      if (c.parentId && ids.has(c.parentId) && !ids.has(c.id)) {
+        ids.add(c.id);
+        changed = true;
+      }
+    }
+  }
+  return ids;
+}
+
+// Full reconciliation scoped to this browser's root collection + browser folder.
+// Only processes folders/collections that are descendants of the roots.
 export async function reconcileFolderMap(
   baseUrl: string,
-  apiKey: string
+  apiKey: string,
+  rootCollectionId: number,
+  rootFolderId: string
 ): Promise<FolderCollectionMap> {
   const [root] = await browser.bookmarks.getTree();
   const serverCollections = await fetchCollections(baseUrl, apiKey);
 
-  const collectionsById = new Map(
-    serverCollections.map((c) => [c.id, c])
-  );
+  const collectionsById = new Map(serverCollections.map((c) => [c.id, c]));
+
+  // Only work with collections in this browser's subtree
+  const managedServerIds = getCollectionSubtreeIds(rootCollectionId, serverCollections);
+  const managedCollections = serverCollections.filter((c) => managedServerIds.has(c.id));
+
   const collectionsByPath = new Map(
-    serverCollections.map((c) => [
+    managedCollections.map((c) => [
       buildCollectionPath(c, collectionsById),
       c,
     ])
@@ -167,41 +282,26 @@ export async function reconcileFolderMap(
   const existingMap = await getFolderMap();
   const newMap: FolderCollectionMap = { entries: [] };
 
-  // Ensure "Mobile Bookmarks" collection exists on server
-  let mobileCollection = serverCollections.find(
-    (c) => c.name === 'Mobile Bookmarks' && !c.parentId
-  );
-
-  // Extract user-created folders from all top-level bookmark nodes
-  const allFolders: Array<{
-    id: string;
-    title: string;
-    parentId?: string;
-  }> = [];
-  if (root.children) {
-    for (const topLevel of root.children) {
-      if (topLevel.children) {
-        allFolders.push(...extractFolders(topLevel.children));
-      }
-    }
+  // Extract user-created folders that are children of the root browser folder
+  const rootBrowserNode = findFolderById([root], rootFolderId);
+  const allFolders: Array<{ id: string; title: string; parentId?: string }> = [];
+  if (rootBrowserNode?.children) {
+    allFolders.push(...extractFolders(rootBrowserNode.children, rootFolderId));
   }
   const foldersById = new Map(allFolders.map((folder) => [folder.id, folder]));
 
-  // Match browser folders → server collections (or create new ones)
+  // Match browser sub-folders → server collections (or create new server collections)
   for (const folder of allFolders) {
-    // Check existing mapping first
     const existingEntry = existingMap.entries.find(
       (e) => e.browserFolderId === folder.id
     );
-    if (existingEntry) {
-      // Verify collection still exists
+    if (existingEntry && managedServerIds.has(existingEntry.collectionId)) {
       if (collectionsById.has(existingEntry.collectionId)) {
         newMap.entries.push(existingEntry);
         continue;
       }
     }
 
-    // Try matching by full path so nested folders map correctly.
     const folderPath = buildFolderPath(folder, foldersById);
     const matchedCollection = collectionsByPath.get(folderPath);
     if (matchedCollection) {
@@ -215,7 +315,7 @@ export async function reconcileFolderMap(
       continue;
     }
 
-    // Create new collection on server
+    // Create new child collection under the appropriate parent
     const parentEntry = folder.parentId
       ? newMap.entries.find((e) => e.browserFolderId === folder.parentId)
       : undefined;
@@ -223,7 +323,7 @@ export async function reconcileFolderMap(
     try {
       const newCollection = await createCollection(baseUrl, apiKey, {
         name: folder.title,
-        parentId: parentEntry?.collectionId,
+        parentId: parentEntry?.collectionId ?? rootCollectionId,
       });
       newMap.entries.push({
         browserFolderId: folder.id,
@@ -237,24 +337,21 @@ export async function reconcileFolderMap(
     }
   }
 
-  // Create browser folders for unmatched server collections
+  // Create browser folders for unmatched managed server collections (excluding root itself)
   const mappedCollectionIds = new Set(newMap.entries.map((e) => e.collectionId));
+  mappedCollectionIds.add(rootCollectionId);
 
-  // Find "Other Bookmarks" folder as the default parent for new folders
-  const otherBookmarksId = getOtherBookmarksFolderId(root.children || []) || '2';
-
-  for (const collection of serverCollections) {
+  for (const collection of managedCollections) {
+    if (collection.id === rootCollectionId) continue;
     if (mappedCollectionIds.has(collection.id)) continue;
-    if (collection.name === 'Unorganized') continue; // Don't create folder for default
 
-    // Create browser folder
     try {
       const parentMapEntry = collection.parentId
         ? newMap.entries.find((e) => e.collectionId === collection.parentId)
         : undefined;
 
       const newFolder = await browser.bookmarks.create({
-        parentId: parentMapEntry?.browserFolderId || otherBookmarksId,
+        parentId: parentMapEntry?.browserFolderId ?? rootFolderId,
         title: collection.name,
       });
 
@@ -263,25 +360,13 @@ export async function reconcileFolderMap(
         browserFolderName: collection.name,
         collectionId: collection.id,
         collectionName: collection.name,
-        parentBrowserFolderId:
-          parentMapEntry?.browserFolderId || otherBookmarksId,
+        parentBrowserFolderId: parentMapEntry?.browserFolderId ?? rootFolderId,
       });
     } catch (err) {
       console.error(
         `Failed to create browser folder for collection "${collection.name}":`,
         err
       );
-    }
-  }
-
-  // Handle Mobile Bookmarks collection
-  if (!mobileCollection) {
-    try {
-      mobileCollection = await createCollection(baseUrl, apiKey, {
-        name: 'Mobile Bookmarks',
-      });
-    } catch (err) {
-      console.error('Failed to create Mobile Bookmarks collection:', err);
     }
   }
 

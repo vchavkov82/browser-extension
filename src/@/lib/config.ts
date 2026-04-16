@@ -1,4 +1,4 @@
-import { getStorageItem, setStorageItem } from './utils.ts';
+import { getStorageItem, setStorageItem, detectBrowserType } from './utils.ts';
 import { configType } from './validators/config.ts';
 
 const DEFAULTS: configType = {
@@ -6,13 +6,21 @@ const DEFAULTS: configType = {
   apiKey: '',
   defaultCollection: 'Unorganized',
   syncBookmarks: false,
+  browserType: undefined,
+  rootCollectionId: null,
+  rootFolderId: null,
 };
 
 const CONFIG_KEY = 'linkwarden_config';
 
 export async function getConfig(): Promise<configType> {
   const config = await getStorageItem(CONFIG_KEY);
-  return config ? JSON.parse(config) : DEFAULTS;
+  const parsed: configType = config ? JSON.parse(config) : DEFAULTS;
+  // Auto-populate browserType on every read so it stays current
+  if (!parsed.browserType) {
+    parsed.browserType = detectBrowserType();
+  }
+  return parsed;
 }
 
 export async function saveConfig(config: configType) {
@@ -37,6 +45,9 @@ export async function clearConfig() {
       apiKey: '',
       defaultCollection: 'Unorganized',
       syncBookmarks: false,
+      browserType: undefined,
+      rootCollectionId: null,
+      rootFolderId: null,
     })
   );
 }

@@ -25,6 +25,13 @@ export async function getCurrentTabInfo(): Promise<{
   return { id, url, title };
 }
 
+export function detectBrowserType(): 'firefox' | 'edge' | 'chrome' {
+  const ua = navigator.userAgent;
+  if (ua.includes('Firefox/')) return 'firefox';
+  if (ua.includes('Edg/')) return 'edge';
+  return 'chrome';
+}
+
 export function getBrowser() {
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   //@ts-ignore

@@ -26,12 +26,14 @@ import {
   type SyncLink,
 } from './apiClient.ts';
 import {
+  ensureRootCollection,
   reconcileFolderMap,
+  getManagedCollectionIds,
   getCollectionIdForFolder,
   getBrowserFolderIdForCollection,
   getBookmarksBarFolderId,
-  getOtherBookmarksFolderId,
   isBookmarksBar,
+  findFolderById,
   type FolderCollectionMap,
 } from './folderMapper.ts';
 
@@ -70,8 +72,16 @@ export async function performSync(options?: {
         ? undefined
         : state.lastSyncTimestamp;
 
-    // 2. Reconcile folder <-> collection mapping
-    const folderMap = await reconcileFolderMap(baseUrl, apiKey);
+    // 2. Ensure root collection + reconcile scoped folder map
+    const { collectionId: rootCollectionId, folderId: rootFolderId } =
+      await ensureRootCollection(baseUrl, apiKey, config.browserType ?? 'chrome');
+    const folderMap = await reconcileFolderMap(
+      baseUrl,
+      apiKey,
+      rootCollectionId,
+      rootFolderId
+    );
+    const managedCollectionIds = getManagedCollectionIds(folderMap, rootCollectionId);
 
     // 3. PULL: Server → Browser
     const syncEntries = await pullFromServer(
@@ -79,11 +89,13 @@ export async function performSync(options?: {
       apiKey,
       since,
       folderMap,
-      result
+      result,
+      managedCollectionIds,
+      rootFolderId
     );
 
     // 4. PUSH: Browser → Server
-    await pushToServer(baseUrl, apiKey, folderMap, syncEntries, result);
+    await pushToServer(baseUrl, apiKey, folderMap, syncEntries, result, managedCollectionIds, rootFolderId);
 
     // 5. Finalize
     await saveSyncEntries(syncEntries);
@@ -110,7 +122,9 @@ async function pullFromServer(
   apiKey: string,
   since: string | undefined,
   folderMap: FolderCollectionMap,
-  result: SyncResult
+  result: SyncResult,
+  managedCollectionIds: Set<number>,
+  rootFolderId: string
 ): Promise<BookmarkSyncEntry[]> {
   const { links, tombstones } = await fetchLinksSince(
     baseUrl,
@@ -123,6 +137,7 @@ async function pullFromServer(
   // Process server links
   for (const link of links) {
     if (!link.url) continue;
+    if (!managedCollectionIds.has(link.collectionId)) continue;
 
     const existingEntry = maps.byServerId.get(link.id);
     const isPinned = link.pinnedBy.length > 0;
@@ -144,7 +159,8 @@ async function pullFromServer(
           const targetFolderId = await getResolvedTargetFolderId(
             link,
             isPinned,
-            folderMap
+            folderMap,
+            rootFolderId
           );
           if (targetFolderId) {
             await moveBookmarkInBrowser(existingEntry.browserBookmarkId, {
@@ -169,7 +185,8 @@ async function pullFromServer(
       const targetFolderId = await getResolvedTargetFolderId(
         link,
         isPinned,
-        folderMap
+        folderMap,
+        rootFolderId
       );
 
       try {
@@ -199,20 +216,19 @@ async function pullFromServer(
   // Process tombstones (server-side deletes)
   for (const tombstone of tombstones) {
     const entry = maps.byServerId.get(tombstone.entityId);
-    if (entry) {
-      try {
-        await removeBookmarkFromBrowser(entry.browserBookmarkId);
-        // Remove from entries
-        const idx = entries.findIndex(
-          (e) => e.serverId === tombstone.entityId
-        );
-        if (idx !== -1) entries.splice(idx, 1);
-        result.deleted++;
-      } catch (err) {
-        result.errors.push(
-          `Pull delete failed for tombstone ${tombstone.entityId}: ${err}`
-        );
-      }
+    if (!entry || !managedCollectionIds.has(entry.collectionId)) continue;
+    try {
+      await removeBookmarkFromBrowser(entry.browserBookmarkId);
+      // Remove from entries
+      const idx = entries.findIndex(
+        (e) => e.serverId === tombstone.entityId
+      );
+      if (idx !== -1) entries.splice(idx, 1);
+      result.deleted++;
+    } catch (err) {
+      result.errors.push(
+        `Pull delete failed for tombstone ${tombstone.entityId}: ${err}`
+      );
     }
   }
 
@@ -224,7 +240,9 @@ async function pushToServer(
   apiKey: string,
   folderMap: FolderCollectionMap,
   syncEntries: BookmarkSyncEntry[],
-  result: SyncResult
+  result: SyncResult,
+  managedCollectionIds: Set<number>,
+  rootFolderId: string
 ): Promise<void> {
   const browserTree = await getBrowserBookmarkTree();
   const browserBookmarks: Array<{
@@ -233,7 +251,9 @@ async function pushToServer(
     title: string;
     parentId?: string;
   }> = [];
-  collectBookmarks(browserTree, browserBookmarks);
+  // Only collect bookmarks from the root sync folder subtree
+  const rootNode = findFolderById(browserTree, rootFolderId);
+  if (rootNode) collectBookmarks([rootNode], browserBookmarks);
   const maps = createSyncMaps(syncEntries);
 
   // Track which cache entries still have a browser bookmark
@@ -433,6 +453,8 @@ async function pushToServer(
   const toDelete: number[] = [];
   for (const [bookmarkId, entry] of maps.byBookmarkId) {
     if (!seenBookmarkIds.has(bookmarkId)) {
+      // Only delete within this browser's managed scope
+      if (!managedCollectionIds.has(entry.collectionId)) continue;
       toDelete.push(entry.serverId);
     }
   }
@@ -475,21 +497,20 @@ function createSyncMaps(entries: BookmarkSyncEntry[]): {
 
 async function resolveRootFolderIds(): Promise<{
   bookmarksBarId: string;
-  otherBookmarksId: string;
 }> {
   const rootChildren = await getBrowserBookmarkTree();
   return {
     bookmarksBarId: getBookmarksBarFolderId(rootChildren) || '1',
-    otherBookmarksId: getOtherBookmarksFolderId(rootChildren) || '2',
   };
 }
 
 async function getResolvedTargetFolderId(
   link: SyncLink,
   isPinned: boolean,
-  folderMap: FolderCollectionMap
+  folderMap: FolderCollectionMap,
+  rootFolderId: string
 ): Promise<string | null> {
-  const { bookmarksBarId, otherBookmarksId } = await resolveRootFolderIds();
+  const { bookmarksBarId } = await resolveRootFolderIds();
   // Pinned links go to Bookmarks Bar
   if (isPinned) {
     return bookmarksBarId;
@@ -502,8 +523,8 @@ async function getResolvedTargetFolderId(
   );
   if (folderId) return folderId;
 
-  // Default: Other Bookmarks
-  return otherBookmarksId;
+  // Default: root sync folder
+  return rootFolderId;
 }
 
 // Quick check if server has changes since last sync (cheap, no full sync)
