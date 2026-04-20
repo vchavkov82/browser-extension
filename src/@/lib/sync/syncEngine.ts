@@ -2,6 +2,7 @@
 // Implements timestamp-gated state reconciliation with union-favoring conflict resolution.
 
 import { getConfig } from '../config.ts';
+import { bootstrapManagedRoot, type BootstrapResult } from './bootstrap.ts';
 import {
   type BookmarkSyncEntry,
   getSyncState,
@@ -26,7 +27,6 @@ import {
   type SyncLink,
 } from './apiClient.ts';
 import {
-  ensureRootCollection,
   reconcileFolderMap,
   getManagedCollectionIds,
   getFolderMap,
@@ -43,6 +43,7 @@ export interface SyncResult {
   pushed: number;
   deleted: number;
   errors: string[];
+  bootstrap?: BootstrapResult;
 }
 
 export async function performSync(options?: {
@@ -73,9 +74,14 @@ export async function performSync(options?: {
         ? undefined
         : state.lastSyncTimestamp;
 
-    // 2. Ensure root collection + reconcile scoped folder map
-    const { collectionId: rootCollectionId, folderId: rootFolderId } =
-      await ensureRootCollection(baseUrl, apiKey, config.browserType ?? 'chrome');
+    // 2. Bootstrap managed root + reconcile scoped folder map
+    const bootstrap = await bootstrapManagedRoot();
+    result.bootstrap = bootstrap;
+    const rootCollectionId = bootstrap.managedRoot.serverCollectionId;
+    const rootFolderId = bootstrap.managedRoot.browserRootFolderId;
+    if (!rootCollectionId || !rootFolderId) {
+      throw new Error('Managed root bootstrap completed without required ids');
+    }
     const folderMap = await reconcileFolderMap(
       baseUrl,
       apiKey,
