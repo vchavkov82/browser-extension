@@ -29,6 +29,7 @@ export interface FolderMapEntry {
   collectionId: number;
   collectionName: string;
   parentBrowserFolderId?: string;
+  isManagedRoot?: boolean;
 }
 
 export interface FolderCollectionMap {
@@ -243,9 +244,9 @@ function buildCollectionPath(
 }
 
 // Returns the root collection ID and all its descendants as a flat Set.
-function getCollectionSubtreeIds(
-  rootId: number,
-  allCollections: ServerCollection[]
+export function getCollectionDescendantIds(
+  allCollections: ServerCollection[],
+  rootId: number
 ): Set<number> {
   const ids = new Set<number>([rootId]);
   let changed = true;
@@ -259,6 +260,58 @@ function getCollectionSubtreeIds(
     }
   }
   return ids;
+}
+
+export function getScopedServerCollections(
+  collections: ServerCollection[],
+  rootCollectionId: number
+): ServerCollection[] {
+  const allowedIds = getCollectionDescendantIds(collections, rootCollectionId);
+  return collections.filter((collection) => allowedIds.has(collection.id));
+}
+
+export function isFolderMapEntryInScope(
+  entry: FolderMapEntry,
+  params: {
+    allowedBrowserFolderIds?: ReadonlySet<string>;
+    allowedCollectionIds?: ReadonlySet<number>;
+  }
+): boolean {
+  if (
+    params.allowedBrowserFolderIds &&
+    !params.allowedBrowserFolderIds.has(entry.browserFolderId)
+  ) {
+    return false;
+  }
+
+  if (
+    params.allowedCollectionIds &&
+    !params.allowedCollectionIds.has(entry.collectionId)
+  ) {
+    return false;
+  }
+
+  if (
+    entry.parentBrowserFolderId &&
+    params.allowedBrowserFolderIds &&
+    !params.allowedBrowserFolderIds.has(entry.parentBrowserFolderId)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+export function filterFolderMapToScope(
+  map: FolderCollectionMap,
+  params: {
+    allowedBrowserFolderIds?: ReadonlySet<string>;
+    allowedCollectionIds?: ReadonlySet<number>;
+  }
+): FolderCollectionMap {
+  return {
+    entries: map.entries.filter((entry) => isFolderMapEntryInScope(entry, params)),
+  };
 }
 
 // Full reconciliation scoped to this browser's root collection + browser folder.
@@ -275,7 +328,7 @@ export async function reconcileFolderMap(
   const collectionsById = new Map(serverCollections.map((c) => [c.id, c]));
 
   // Only work with collections in this browser's subtree
-  const managedServerIds = getCollectionSubtreeIds(rootCollectionId, serverCollections);
+  const managedServerIds = getCollectionDescendantIds(serverCollections, rootCollectionId);
   const managedCollections = serverCollections.filter((c) => managedServerIds.has(c.id));
 
   const collectionsByPath = new Map(

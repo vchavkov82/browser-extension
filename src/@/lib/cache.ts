@@ -1,4 +1,14 @@
 import { getBrowser, getStorageItem, setStorageItem } from './utils.ts';
+import {
+  detectBrowserIdentity,
+  getManagedRootDescriptor,
+} from './browserIdentity.ts';
+import type {
+  BootstrapDiagnostic,
+  BrowserIdentity,
+  SyncDiagnostic,
+  SyncDiagnosticRunMetrics,
+} from './validators/config.ts';
 import BookmarkTreeNode = chrome.bookmarks.BookmarkTreeNode;
 
 const browser = getBrowser();
@@ -22,30 +32,162 @@ export interface SyncState {
   lastSyncTimestamp: string | null;
   syncInProgress: boolean;
   suppressBrowserEvents: boolean;
+  browserIdentity?: BrowserIdentity;
+  bootstrap?: {
+    phase?: string;
+    lastSuccessAt?: string;
+    browserRootFolderId?: string;
+    serverCollectionId?: number;
+    lastError?: BootstrapDiagnostic;
+  };
+  sync?: Partial<SyncDiagnostic>;
+}
+
+function mergeSyncRunMetrics(
+  current?: SyncDiagnosticRunMetrics,
+  partial?: SyncDiagnosticRunMetrics
+): SyncDiagnosticRunMetrics | undefined {
+  if (!current && !partial) {
+    return undefined;
+  }
+
+  return {
+    ...(current ?? {}),
+    ...(partial ?? {}),
+    mutated: {
+      ...(current?.mutated ?? {}),
+      ...(partial?.mutated ?? {}),
+    },
+  };
+}
+
+export interface BrowserBookmarkRecord {
+  id: string;
+  url: string;
+  title: string;
+  parentId?: string;
 }
 
 const DEFAULT_SYNC_STATE: SyncState = {
   lastSyncTimestamp: null,
   syncInProgress: false,
   suppressBrowserEvents: false,
+  browserIdentity: detectBrowserIdentity(),
+  bootstrap: {
+    phase: 'idle',
+  },
+  sync: {
+    phase: 'idle',
+  },
 };
+
+function getDefaultSyncState(
+  identity: BrowserIdentity = detectBrowserIdentity()
+): SyncState {
+  const descriptor = getManagedRootDescriptor(identity);
+
+  return {
+    ...DEFAULT_SYNC_STATE,
+    browserIdentity: identity,
+    bootstrap: {
+      phase: 'idle',
+      browserRootFolderId: undefined,
+      serverCollectionId: undefined,
+      lastError: undefined,
+      lastSuccessAt: undefined,
+    },
+    sync: {
+      phase: 'idle',
+      lastAttemptAt: undefined,
+      lastSuccessAt: undefined,
+      lastError: undefined,
+      run: undefined,
+      pull: undefined,
+      push: undefined,
+    },
+    // keep descriptor reachable by later tasks via config; state stores ids + diagnostics
+    ...(descriptor ? {} : {}),
+  };
+}
 
 // --- Sync State ---
 
 export async function getSyncState(): Promise<SyncState> {
   const stored = await getStorageItem(SYNC_STATE_KEY);
-  return stored ? JSON.parse(stored) : { ...DEFAULT_SYNC_STATE };
+  return stored
+    ? {
+        ...getDefaultSyncState(),
+        ...JSON.parse(stored),
+        bootstrap: {
+          ...getDefaultSyncState().bootstrap,
+          ...JSON.parse(stored).bootstrap,
+        },
+        sync: {
+          ...getDefaultSyncState().sync,
+          ...JSON.parse(stored).sync,
+          run: mergeSyncRunMetrics(
+            getDefaultSyncState().sync?.run,
+            JSON.parse(stored).sync?.run
+          ),
+        },
+      }
+    : getDefaultSyncState();
 }
 
 export async function saveSyncState(state: SyncState): Promise<void> {
-  await setStorageItem(SYNC_STATE_KEY, JSON.stringify(state));
+  await setStorageItem(
+    SYNC_STATE_KEY,
+    JSON.stringify({
+      ...getDefaultSyncState(state.browserIdentity),
+      ...state,
+      bootstrap: {
+        ...getDefaultSyncState(state.browserIdentity).bootstrap,
+        ...state.bootstrap,
+      },
+      sync: {
+        ...getDefaultSyncState(state.browserIdentity).sync,
+        ...state.sync,
+        run: mergeSyncRunMetrics(
+          getDefaultSyncState(state.browserIdentity).sync?.run,
+          state.sync?.run
+        ),
+      },
+    })
+  );
 }
 
 export async function updateSyncState(
   partial: Partial<SyncState>
 ): Promise<SyncState> {
   const current = await getSyncState();
-  const updated = { ...current, ...partial };
+  const updated = {
+    ...current,
+    ...partial,
+    bootstrap: {
+      ...current.bootstrap,
+      ...partial.bootstrap,
+    },
+    sync: {
+      ...current.sync,
+      ...partial.sync,
+      run: mergeSyncRunMetrics(current.sync?.run, partial.sync?.run),
+    },
+  };
+  await saveSyncState(updated);
+  return updated;
+}
+
+export async function resetBootstrapState(
+  identity: BrowserIdentity = detectBrowserIdentity()
+): Promise<SyncState> {
+  const current = await getSyncState();
+  const updated = {
+    ...current,
+    browserIdentity: identity,
+    bootstrap: {
+      ...getDefaultSyncState(identity).bootstrap,
+    },
+  };
   await saveSyncState(updated);
   return updated;
 }
@@ -129,6 +271,18 @@ export async function removeSyncEntryByBookmarkId(
   await saveSyncEntries(filtered);
 }
 
+export function buildScopedSyncEntryMaps(entries: BookmarkSyncEntry[]): {
+  byServerId: Map<number, BookmarkSyncEntry>;
+  byBookmarkId: Map<string, BookmarkSyncEntry>;
+  byUrl: Map<string, BookmarkSyncEntry>;
+} {
+  return {
+    byServerId: new Map(entries.map((e) => [e.serverId, e])),
+    byBookmarkId: new Map(entries.map((e) => [e.browserBookmarkId, e])),
+    byUrl: new Map(entries.map((e) => [e.url, e])),
+  };
+}
+
 // Build Maps for fast lookups during sync
 export async function getSyncMaps(): Promise<{
   byServerId: Map<number, BookmarkSyncEntry>;
@@ -136,11 +290,7 @@ export async function getSyncMaps(): Promise<{
   byUrl: Map<string, BookmarkSyncEntry>;
 }> {
   const entries = await getSyncEntries();
-  return {
-    byServerId: new Map(entries.map((e) => [e.serverId, e])),
-    byBookmarkId: new Map(entries.map((e) => [e.browserBookmarkId, e])),
-    byUrl: new Map(entries.map((e) => [e.url, e])),
-  };
+  return buildScopedSyncEntryMaps(entries);
 }
 
 // --- Browser Bookmarks Helpers ---
@@ -183,15 +333,27 @@ export async function getBrowserBookmarkTree(): Promise<BookmarkTreeNode[]> {
   return root.children || [];
 }
 
-// Walk the full bookmark tree and collect all bookmark URLs (not folders)
+export function findBookmarkNodeById(
+  nodes: BookmarkTreeNode[],
+  nodeId: string
+): BookmarkTreeNode | undefined {
+  for (const node of nodes) {
+    if (node.id === nodeId) {
+      return node;
+    }
+    if (node.children) {
+      const match = findBookmarkNodeById(node.children, nodeId);
+      if (match) {
+        return match;
+      }
+    }
+  }
+  return undefined;
+}
+
 export function collectBookmarks(
   nodes: BookmarkTreeNode[],
-  accumulator: Array<{
-    id: string;
-    url: string;
-    title: string;
-    parentId?: string;
-  }>
+  accumulator: BrowserBookmarkRecord[]
 ): void {
   for (const node of nodes) {
     if (node.url) {
@@ -205,6 +367,100 @@ export function collectBookmarks(
       collectBookmarks(node.children, accumulator);
     }
   }
+}
+
+export function collectBookmarksInSubtree(
+  rootNode: BookmarkTreeNode | undefined
+): BrowserBookmarkRecord[] {
+  if (!rootNode?.children) {
+    return [];
+  }
+
+  const bookmarks: BrowserBookmarkRecord[] = [];
+  collectBookmarks(rootNode.children, bookmarks);
+  return bookmarks;
+}
+
+export function getBrowserDescendantFolderIds(
+  rootNode: BookmarkTreeNode | undefined
+): Set<string> {
+  const folderIds = new Set<string>();
+
+  if (!rootNode) {
+    return folderIds;
+  }
+
+  const visit = (node: BookmarkTreeNode): void => {
+    if (!node.url) {
+      folderIds.add(node.id);
+      for (const child of node.children ?? []) {
+        visit(child);
+      }
+    }
+  };
+
+  visit(rootNode);
+  return folderIds;
+}
+
+export function isBookmarkInsideManagedRoot(
+  bookmarkId: string,
+  tree: BookmarkTreeNode[],
+  browserRootFolderId?: string
+): boolean {
+  if (!browserRootFolderId) {
+    return false;
+  }
+
+  const rootNode = findBookmarkNodeById(tree, browserRootFolderId);
+  if (!rootNode) {
+    return false;
+  }
+
+  const bookmark = findBookmarkNodeById([rootNode], bookmarkId);
+  return Boolean(bookmark?.url);
+}
+
+// Out-of-scope cache entries are intentionally ignored rather than repaired.
+// Later sync phases should only reuse entries that still resolve inside the active
+// managed browser root + server collection pair.
+export function isSyncEntryInScope(
+  entry: BookmarkSyncEntry,
+  params: {
+    browserTree: BookmarkTreeNode[];
+    browserRootFolderId?: string;
+    allowedCollectionIds?: ReadonlySet<number>;
+  }
+): boolean {
+  if (!params.browserRootFolderId) {
+    return false;
+  }
+
+  if (
+    params.allowedCollectionIds &&
+    !params.allowedCollectionIds.has(entry.collectionId)
+  ) {
+    return false;
+  }
+
+  const rootNode = findBookmarkNodeById(params.browserTree, params.browserRootFolderId);
+  if (!rootNode) {
+    return false;
+  }
+
+  const bookmark = findBookmarkNodeById([rootNode], entry.browserBookmarkId);
+  return Boolean(bookmark?.url);
+}
+
+export function filterSyncEntriesToScope(
+  entries: BookmarkSyncEntry[],
+  params: {
+    browserTree: BookmarkTreeNode[];
+    browserRootFolderId?: string;
+    allowedCollectionIds?: ReadonlySet<number>;
+  }
+): BookmarkSyncEntry[] {
+  return entries.filter((entry) => isSyncEntryInScope(entry, params));
 }
 
 // --- Migration from old format ---
